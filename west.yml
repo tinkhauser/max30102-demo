@@ -6,7 +6,7 @@ manifest:
     - name: nrf
       repo-path: sdk-nrf
       remote: nrfconnect
-      revision: v1.7.9
+      revision: v1.7.1
       import: true
     # Drivers repository
     - name: max30102
