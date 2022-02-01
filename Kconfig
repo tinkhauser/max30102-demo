@@ -1,0 +1,4 @@
+mainmenu "Max30102 Demo"
+
+source "Kconfig.zephyr"
+

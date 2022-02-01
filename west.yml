@@ -1,0 +1,19 @@
+manifest:
+  remotes:
+    - name: nrfconnect
+      url-base: https://github.com/nrfconnect
+  projects:
+    - name: nrf
+      repo-path: sdk-nrf
+      remote: nrfconnect
+      revision: v1.7.9
+      import: true
+    # Drivers repository
+    - name: max30102
+      path: max30102
+      revision: main
+      url: https://github.com/tinkhauser/max30102_zephyr
+        #import: true
+  self:
+    # This repository should be cloned to 
+    path: max30102-demo
