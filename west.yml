@@ -11,7 +11,7 @@ manifest:
     # Drivers repository
     - name: max30102
       path: max30102
-      revision: main
+      revision: 763ebe2c64390af0ffa9054e54f6dbbcc5d78b27
       url: https://github.com/tinkhauser/max30102_zephyr
       import: true
   self:
