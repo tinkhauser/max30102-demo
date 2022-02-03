@@ -284,10 +284,11 @@ static void interrupt_workQueue_handler(struct k_work *wrk) {
 
     // max30102 is ready for temp reading (DIE_TEMP_RDY)
     if (status_2 == 2) {
-        struct max30102_temp temp = {0};
-        max30102_get_temp(dev, &temp);
-		uint8_t offset = 0;
-		//max30102_get_temp_offset(dev, offset)
+        struct sensor_value temp;
+        sensor_sample_fetch_chan(dev, SENSOR_CHAN_DIE_TEMP);
+        sensor_channel_get(dev, SENSOR_CHAN_DIE_TEMP, &temp);
+        float f_temp = (float) temp.val1 + ((float) temp.val2 / 1000000);
+        LOG_INF("TEMP=%f", f_temp);
     }
     // FIFO is almost full (A_FULL)
     else if (status_1 == 128) {
