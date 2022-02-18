@@ -1,0 +1,15 @@
+/*
+ * Copyright (c) 2022 EVERGREEN FUND 501(c)(3)
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+&i2c0 {
+    status = "okay";
+
+	max30102@57 {
+		compatible = "maxim,max30102";
+		label = "MAX30102";
+		reg = <0x57>;
+		status = "okay";
+	};
+};

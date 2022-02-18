@@ -5,11 +5,13 @@
  */
 
 &i2c0 {
-	max30102@57 {
+    status = "okay";
+    max30102: max30102@57 {
         compatible = "maxim,max30102";
         reg = <0x57>;
-		/* int-gpios = <&gpio0 0 GPIO_ACTIVE_HIGH>; */ /* P0.00 / 3 */
+        intb-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>; /* P0.00 / 3 */
         label = "MAX30102";
-
-	};
+        mode = <3>;
+        fifo-a-full = <1>;
+    };
 };

@@ -9,42 +9,24 @@
 #include <bluetooth/gatt.h>
 #include <bluetooth/hci.h>
 #include <bluetooth/uuid.h>
-
+#include <device.h>
+#include <devicetree.h>
+#include <drivers/gpio.h>
+#include <drivers/sensor.h>
 #include <errno.h>
 #include <logging/log.h>
+#include <max30102.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/byteorder.h>
 #include <sys/printk.h>
-
 #include <zephyr.h>
 #include <zephyr/types.h>
-#include <device.h>
-#include <devicetree.h>
-#include <drivers/gpio.h>
-
-#include <max30102.h>
-
-/* 1000 msec = 1 sec */
-#define ZEPHYR_OK 0
-#define SLEEP_TIME_MS 1000
-#define MAX30102_INT_N ((uint8_t)13)  ///< P0.13 pin used for receiving interrupts from MAX30102
-#define DEBUG_LED_1 ((uint8_t)17)     ///< P0.17 pin used Debug LED 1
-#define DEBUG_LED_2 ((uint8_t)18)     ///< P0.18 pin used Debug LED 2
 
 /* Static Functions */
-static int gpio_init(void);
-static void max30102_irq_cb(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins);
-static void interrupt_workQueue_handler(struct k_work *wrk);
 static ssize_t recv(struct bt_conn *conn,
                     const struct bt_gatt_attr *attr, const void *buf,
                     uint16_t len, uint16_t offset, uint8_t flags);
-
-/* Global variables */
-const struct device *gpio_0_dev;
-struct gpio_callback callback;
-struct k_work interrupt_work_item;  ///< interrupt work item
-const struct device *dev;
 
 struct Led_sample {
     uint32_t red;
@@ -67,6 +49,40 @@ inline uint32_t reverse_32(uint32_t value) {
 
 /* For Logging */
 LOG_MODULE_REGISTER(app, CONFIG_LOG_DEFAULT_LEVEL);
+
+K_SEM_DEFINE(sem, 0, 1);
+
+#ifdef CONFIG_MAX30102_TRIGGER
+/* Handles interrupts */
+static void trigger_handler(const struct device *max30102,
+                            const struct sensor_trigger *trigger) {
+    switch (trigger->type) {
+        case SENSOR_TRIG_DATA_READY:
+            if (sensor_sample_fetch(max30102)) {
+                LOG_ERR("Sample fetch error\n");
+                return;
+            }
+            LOG_INF("Fetched sample\n");
+            k_sem_give(&sem);
+            break;
+        default:
+            LOG_ERR("Unknown trigger\n");
+    }
+}
+
+static void drdy_trigger_mode(const struct device *max30102) {
+    struct sensor_trigger trig = {
+        .type = SENSOR_TRIG_DATA_READY,
+        .chan = SENSOR_CHAN_ALL,
+    };
+
+    if (sensor_trigger_set(max30102, &trig, trigger_handler)) {
+        LOG_ERR("Could not set trigger\n");
+        return;
+    }
+    LOG_INF("Set trigger handler\n");
+}
+#endif
 
 static uint32_t rand_val = 1;
 
@@ -120,6 +136,7 @@ static void mpu_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
 
 /* The BT832A board is acting as GATT server.
  * The other side is the BLE GATT client.
+ * TODO change naming
  */
 
 /* BT832A GATT services and characteristic */
@@ -184,93 +201,13 @@ static struct bt_conn_cb conn_callbacks = {
     .disconnected = disconnected,
 };
 
-void main(void) {
-    LOG_ERR("This is a error message!");
-    LOG_WRN("This is a warning message!");
-    LOG_INF("This is a information message!");
-    LOG_DBG("This is a debugging message!");
-    int ret;
-    bool led_1_is_on = true;
-
-    ret = gpio_init();
-    if (ret == ZEPHYR_OK) {
-        LOG_INF("GPIOs Int'd!");
-    }
-
-    dev = DEVICE_DT_GET_ANY(maxim_max30102);
-
-    if (dev == NULL) {
-        LOG_ERR("Could not get max30102 device\n");
-        return;
-    }
-    if (!device_is_ready(dev)) {
-        LOG_ERR("max30102 device %s is not ready\n", dev->name);
-        return;
-    }
-
-    /* BLE part */
-    bt_conn_cb_register(&conn_callbacks);
-
-    /* Initialize the Bluetooth Subsystem */
-    ret = bt_enable(bt_ready);
-    if (ret) {
-        LOG_ERR("Bluetooth init failed (err %d)", ret);
-    }
-
-    /* Clear any existing interrupts */
-    sensor_sample_fetch(dev);
-
-    while (1) {
-        gpio_pin_set(gpio_0_dev, DEBUG_LED_1, (int)led_1_is_on);
-        led_1_is_on = !led_1_is_on;
-        k_msleep(SLEEP_TIME_MS);
-    }
-}
-
-static int gpio_init(void) {
-    int ret = ZEPHYR_OK;
-
-    gpio_0_dev = device_get_binding("GPIO_0");
-    if (gpio_0_dev == NULL) {
-        LOG_ERR("***ERROR: GPIO device binding!");
-        return -1;
-    }
-
-    /* LED for debug purposes */
-    ret = gpio_pin_configure(gpio_0_dev, DEBUG_LED_1, GPIO_OUTPUT_ACTIVE);
-    ret += gpio_pin_configure(gpio_0_dev, DEBUG_LED_2, GPIO_OUTPUT_ACTIVE);
-    /* Initialize MAX30102 Interrupt input */
-    ret += gpio_pin_configure(gpio_0_dev, MAX30102_INT_N, GPIO_INPUT | GPIO_PULL_UP);
-    ret += gpio_pin_interrupt_configure(gpio_0_dev, MAX30102_INT_N, GPIO_INT_EDGE_FALLING);
-    gpio_init_callback(&callback, max30102_irq_cb, BIT(MAX30102_INT_N));
-    ret += gpio_add_callback(gpio_0_dev, &callback);
-    if (ret != 0) {
-        LOG_ERR("***ERROR: GPIO initialization\n");
-    }
-    gpio_pin_set(gpio_0_dev, DEBUG_LED_2, 0);
-    k_work_init(&interrupt_work_item, interrupt_workQueue_handler);
-
-    return ret;
-}
-
-/**
- * @brief Callback function for handling interrupt coming from the MAX30102 (MAX30102_INT_N pin).
- *
- * @param port Runtime device structure (in ROM) per driver instance.
- * @param cb GPIO callback structure
- * @param pins Identifies a set of pins associated with a port
- * @warning Called at ISR Level, no actual workload should be implemented here
- */
-static void max30102_irq_cb(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins) {
-    k_work_submit(&interrupt_work_item);
-}
-
 /**
  * @brief IntWorkQueue handler. Used to process interrupts coming from MAX30102 interrupt pin
  * Because all activity is performed on cooperative level no addition protection against data corruption is required
  * @param wrk work object
  * @warning  Called by system scheduled in cooperative level.
  */
+/*
 static void interrupt_workQueue_handler(struct k_work *wrk) {
     int err;
     static uint8_t sample_num;
@@ -279,15 +216,20 @@ static void interrupt_workQueue_handler(struct k_work *wrk) {
     gpio_pin_toggle(gpio_0_dev, DEBUG_LED_2);
 
     // Read interrupt status registers
-    uint8_t status_1 = max30102_get_interrupt_status_1(dev);
-    uint8_t status_2 = max30102_get_interrupt_status_2(dev);
+    uint8_t status_1, status_2;
+    err = max30102_get_interrupt_status_1(dev, &status_1);
+    err = max30102_get_interrupt_status_2(dev, &status_2);
+    if (err)
+    {
+        LOG_ERR("Failed to read status registers, error code: %d", err);
+    }
 
     // max30102 is ready for temp reading (DIE_TEMP_RDY)
     if (status_2 == 2) {
         struct sensor_value temp;
         sensor_sample_fetch_chan(dev, SENSOR_CHAN_DIE_TEMP);
         sensor_channel_get(dev, SENSOR_CHAN_DIE_TEMP, &temp);
-        float f_temp = (float) temp.val1 + ((float) temp.val2 / 1000000);
+        float f_temp = sensor_value_to_double(&temp);
         LOG_INF("TEMP=%f", f_temp);
     }
     // FIFO is almost full (A_FULL)
@@ -332,5 +274,51 @@ static void interrupt_workQueue_handler(struct k_work *wrk) {
     // Ambient Light Cancellation Overflow (ALC_OVF)
     else {
         // TODO: deal with corrupted FIFO
+    }
+}
+*/
+
+void main(void) {
+    const struct device *max30102_dev = DEVICE_DT_GET_ANY(maxim_max30102);
+
+    if (max30102_dev == NULL) {
+        LOG_ERR("Could not get max30102 device\n");
+        return;
+    }
+    if (!device_is_ready(max30102_dev)) {
+        LOG_ERR("Device %s is not ready\n", max30102_dev->name);
+        return;
+    }
+    int ret;
+
+#ifdef CONFIG_MAX30102_TRIGGER
+    drdy_trigger_mode(max30102_dev);
+#endif
+
+    /* BLE part */
+    bt_conn_cb_register(&conn_callbacks);
+
+    /* Initialize the Bluetooth Subsystem */
+    ret = bt_enable(bt_ready);
+    if (ret) {
+        LOG_ERR("Bluetooth init failed (err %d)", ret);
+    }
+
+    while (1) {
+#ifdef CONFIG_MAX30102_TRIGGER
+        k_sem_take(&sem, K_FOREVER);
+#else
+        if (sensor_sample_fetch(dev) < 0) {
+            LOG_ERR("Sample fetch failed\n");
+            return;
+        }
+        k_msleep(SLEEP_TIME_MS);
+#endif
+        struct sensor_value red;
+        struct sensor_value ir;
+        sensor_channel_get(max30102_dev, SENSOR_CHAN_RED, &red);
+        sensor_channel_get(max30102_dev, SENSOR_CHAN_IR, &ir);
+
+        LOG_INF("RED=%x IR=%x", red.val1, ir.val1);
     }
 }
