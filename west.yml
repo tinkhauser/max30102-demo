@@ -12,6 +12,7 @@ manifest:
     - name: max30102
       path: max
       url: https://github.com/tinkhauser/max30102_zephyr
+      revision: main
   self:
     # This repository should be cloned to 
     path: max30102-demo
