@@ -1,0 +1,19 @@
+// Copyright (c) 2022 Jacob Tinkhauser
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+syntax = "proto3";
+
+import "nanopb.proto";
+
+// TODO: add more support for more types of data
+// Eg: get ppg setting, set ppg settings, accelerometer data 
+
+
+message PPG {
+    uint32 Red = 1;
+    uint32 IR = 2;
+}
+
+message DataFrame {
+    repeated PPG ppgs = 1 [(nanopb).max_count = 24, (nanopb).fixed_count = true];
+}

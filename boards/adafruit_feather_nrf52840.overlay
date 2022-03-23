@@ -10,12 +10,10 @@
     max30102: max30102@57 {
         compatible = "maxim,max30102";
         reg = <0x57>;
-        intb-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>;
+        intb-gpios = <&gpio0 7 GPIO_ACTIVE_LOW>;
         label = "MAX30102";
         mode = <3>;
         fifo-a-full = <1>;
-        smp-ave = <1>;
-        sr = <2>;
     };
 }; 
 
@@ -25,6 +23,6 @@
         compatible = "invensense,mpu6050";
         reg = <0x68>;
         label = "MPU6050";
-        int-gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>;
+        int-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
     };
 };

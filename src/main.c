@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2021, EVERGREEN FUND 501(c)(3)
+ * Copyright (c) 2021 EVERGREEN FUND 501(c)(3)
+ * Copyright (c) 2022 Jacob Tinkhauser
  *
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
@@ -18,10 +19,18 @@
 #include <max30102.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdio.h>
 #include <sys/byteorder.h>
 #include <sys/printk.h>
 #include <zephyr.h>
 #include <zephyr/types.h>
+
+#include <pb_encode.h>
+#include <pb_decode.h>
+#include "simple.pb.c" /* TODO: why's does this require *.c and not *.h? */
+
+
+
 
 /* Static Functions */
 static ssize_t recv(struct bt_conn *conn,
@@ -33,56 +42,71 @@ struct Led_sample {
     uint32_t ir;
 };
 
-struct __attribute__((__packed__)) Sample_packet {
+struct Sample_packet {
     struct Led_sample samples[30];
     uint8_t sample_num;
-    char end_bytes[2];
 };
-
-/* Helper function to reverse endianness */
-inline uint32_t reverse_32(uint32_t value) {
-    return (((value & 0x000000FF) << 24) |
-            ((value & 0x0000FF00) << 8) |
-            ((value & 0x00FF0000) >> 8) |
-            ((value & 0xFF000000) >> 24));
-}
 
 /* For Logging */
 LOG_MODULE_REGISTER(app, CONFIG_LOG_DEFAULT_LEVEL);
 
 K_SEM_DEFINE(sem, 0, 1);
 
-#ifdef CONFIG_MAX30102_TRIGGER
-/* Handles interrupts */
-static void trigger_handler(const struct device *max30102,
-                            const struct sensor_trigger *trigger) {
-    switch (trigger->type) {
-        case SENSOR_TRIG_DATA_READY:
-            if (sensor_sample_fetch(max30102)) {
-                LOG_ERR("Sample fetch error\n");
-                return;
-            }
-            LOG_INF("Fetched sample\n");
-            k_sem_give(&sem);
-            break;
-        default:
-            LOG_ERR("Unknown trigger\n");
+/* Nanopb */
+bool encode_message(struct Sample_packet *packet, uint8_t *buffer, size_t buffer_size, size_t *message_length) {
+    bool status;
+
+    /* Allocate space on the stack to store the message data.
+     *
+     * It is a good idea to always initialize your structures
+     * so that you do not have garbage data from RAM in there.
+     */
+    DataFrame dataframe_msg = DataFrame_init_zero;
+
+    /* Create a stream that will write to our buffer. */
+    pb_ostream_t stream = pb_ostream_from_buffer(buffer, buffer_size);
+
+    for (int i = 0; i < 24; i++) {
+        dataframe_msg.ppgs[i].Red = packet->samples[i].red;
+        dataframe_msg.ppgs[i].IR = packet->samples[i].ir;
     }
+
+    /* Now we are ready to encode the message! */
+    status = pb_encode(&stream, DataFrame_fields, &dataframe_msg);
+    *message_length = stream.bytes_written;
+
+    if (!status) {
+        printk("Encoding failed: %s\n", PB_GET_ERROR(&stream));
+    }
+
+    return status;
 }
 
-static void drdy_trigger_mode(const struct device *max30102) {
-    struct sensor_trigger trig = {
-        .type = SENSOR_TRIG_DATA_READY,
-        .chan = SENSOR_CHAN_ALL,
-    };
+bool decode_message(uint8_t *buffer, size_t message_length) {
+    bool status;
 
-    if (sensor_trigger_set(max30102, &trig, trigger_handler)) {
-        LOG_ERR("Could not set trigger\n");
-        return;
+    /* Allocate space for the decoded message. */
+    DataFrame message = DataFrame_init_zero;
+
+    /* Create a stream that reads from the buffer. */
+    pb_istream_t stream = pb_istream_from_buffer(buffer, message_length);
+
+    /* Now we are ready to decode the message. */
+    status = pb_decode(&stream, DataFrame_fields, &message);
+
+    /* Check for errors... */
+    if (status) {
+        /* Print the data contained in the message. */
+        printk("Buffer contains: ");
+        printk("Red was %d!\n", (int)message.ppgs[0].Red);
+        printk("IR was %d!\n", (int)message.ppgs[0].IR);
+        printk("Message length %d\n", message_length);
+    } else {
+        printk("Decoding failed: %s\n", PB_GET_ERROR(&stream));
     }
-    LOG_INF("Set trigger handler\n");
+
+    return status;
 }
-#endif
 
 static uint32_t rand_val = 1;
 
@@ -278,7 +302,176 @@ static void interrupt_workQueue_handler(struct k_work *wrk) {
 }
 */
 
+#ifdef CONFIG_MAX30102_TRIGGER
+
+/* Handles interrupts */
+static void trigger_handler(const struct device *max30102,
+                            const struct sensor_trigger *trigger) {
+    /* switch (trigger->type) {
+        case SENSOR_TRIG_DATA_READY:
+            if (sensor_sample_fetch(max30102)) {
+                LOG_ERR("Sample fetch error\n");
+                return;
+            }
+            LOG_INF("Fetched sample\n");
+            k_sem_give(&sem);
+            break;
+        default:
+            LOG_ERR("Unknown trigger\n");
+    }
+    */
+    static uint8_t sample_num;
+    sample_num++;
+
+    struct Sample_packet packet = {.sample_num = sample_num};
+    for (int i = 0; i < 30; i++) {
+        if (sensor_sample_fetch(max30102)) {
+            LOG_ERR("Sample fetch error\n");
+            return;
+        }
+        LOG_INF("Fetched sample\n");
+        struct sensor_value red;
+        struct sensor_value ir;
+        sensor_channel_get(max30102, SENSOR_CHAN_RED, &red);
+        sensor_channel_get(max30102, SENSOR_CHAN_IR, &ir);
+
+        packet.samples[i].red = red.val1;
+        packet.samples[i].ir = ir.val1;
+
+        // LOG_INF("RED=%x IR=%x", red.val1, ir.val1);
+    }
+
+    /* This is the buffer where we will store our message. */
+    uint8_t buffer[DataFrame_size];
+    size_t message_length;
+
+    /* Encode our message */
+    if (!encode_message(&packet, buffer, sizeof(buffer), &message_length)) {
+        return;
+    }
+
+    //thread_analyzer_print();
+    //decode_message(buffer, message_length);
+
+    if (conn) {
+        if (notify_enable) {
+            /* Since protobuf uses var ints, the message length will change based on input data */
+            int err = bt_gatt_notify(NULL, &bt832a_svc.attrs[4], &buffer, message_length);
+            if (err) {
+                LOG_ERR("Notify error: %d", err);
+            } else {
+                LOG_INF("Send notify ok");
+            }
+        } else {
+            LOG_INF("Notify not enabled");
+        }
+    } else {
+        LOG_INF("BLE not connected");
+    }
+
+    k_sem_give(&sem);
+}
+
+static void drdy_trigger_mode(const struct device *max30102) {
+    struct sensor_trigger trig = {
+        .type = SENSOR_TRIG_DATA_READY,
+        .chan = SENSOR_CHAN_ALL,
+    };
+
+    if (sensor_trigger_set(max30102, &trig, trigger_handler)) {
+        LOG_ERR("Could not set trigger\n");
+        return;
+    }
+    LOG_INF("Set trigger handler\n");
+}
+#endif
+
+static const char *now_str(void)
+{
+    static char buf[16]; /* ...HH:MM:SS.MMM */
+    uint32_t now = k_uptime_get_32();
+    unsigned int ms = now % MSEC_PER_SEC;
+    unsigned int s;
+    unsigned int min;
+    unsigned int h;
+
+    now /= MSEC_PER_SEC;
+    s = now % 60U;
+        now /= 60U;
+        min = now % 60U;
+        now /= 60U;
+        h = now;
+
+        snprintf(buf, sizeof(buf), "%u:%02u:%02u.%03u",
+                 h, min, s, ms);
+        return buf;
+}
+
+static int process_mpu6050(const struct device *dev) {
+    struct sensor_value temperature;
+    struct sensor_value accel[3];
+    struct sensor_value gyro[3];
+    int rc = sensor_sample_fetch(dev);
+
+    if (rc == 0) {
+        rc = sensor_channel_get(dev, SENSOR_CHAN_ACCEL_XYZ,
+                                accel);
+    }
+    if (rc == 0) {
+        rc = sensor_channel_get(dev, SENSOR_CHAN_GYRO_XYZ,
+                                gyro);
+    }
+    if (rc == 0) {
+        rc = sensor_channel_get(dev, SENSOR_CHAN_AMBIENT_TEMP,
+                                &temperature);
+    }
+    if (rc == 0) {
+        LOG_INF(
+            "[%s]:%g Cel\n"
+            "accel %f %f %f m/s/s\n"
+            "gyro  %f %f %f rad/s\n",
+            now_str(),
+            sensor_value_to_double(&temperature),
+            sensor_value_to_double(&accel[0]),
+            sensor_value_to_double(&accel[1]),
+            sensor_value_to_double(&accel[2]),
+            sensor_value_to_double(&gyro[0]),
+            sensor_value_to_double(&gyro[1]),
+            sensor_value_to_double(&gyro[2]));
+    } else {
+        LOG_ERR("sample fetch/get failed: %d\n", rc);
+    }
+
+    return rc;
+}
+
+#ifdef CONFIG_MPU6050_TRIGGER
+static struct sensor_trigger trigger;
+
+static void handle_mpu6050_drdy(const struct device *dev,
+                const struct sensor_trigger *trig)
+{
+    int rc = process_mpu6050(dev);
+
+    if (rc != 0) {
+        //printf("cancelling trigger due to failure: %d\n", rc);
+        //(void)sensor_trigger_set(dev, trig, NULL);
+        return;
+    }
+}
+#endif /* CONFIG_MPU6050_TRIGGER */
+
 void main(void) {
+    /* MPU 6050 */
+#ifdef CONFIG_MPU6050
+    const struct device *mpu6050 = DEVICE_DT_GET_ANY(invensense_mpu6050);
+
+    if (!mpu6050) {
+        LOG_ERR("Failed to find sensor invesense_mpu6050\n");
+        return;
+    }
+#endif
+
     const struct device *max30102_dev = DEVICE_DT_GET_ANY(maxim_max30102);
 
     if (max30102_dev == NULL) {
@@ -290,6 +483,19 @@ void main(void) {
         return;
     }
     int ret;
+
+#ifdef CONFIG_MPU6050_TRIGGER
+    trigger = (struct sensor_trigger){
+        .type = SENSOR_TRIG_DATA_READY,
+        .chan = SENSOR_CHAN_ALL,
+    };
+    if (sensor_trigger_set(mpu6050, &trigger,
+                           handle_mpu6050_drdy) < 0) {
+        LOG_ERR("Cannot configure trigger\n");
+        return;
+    }
+    LOG_INF("Configured for triggered sampling.\n");
+#endif
 
 #ifdef CONFIG_MAX30102_TRIGGER
     drdy_trigger_mode(max30102_dev);
@@ -304,21 +510,16 @@ void main(void) {
         LOG_ERR("Bluetooth init failed (err %d)", ret);
     }
 
-    while (1) {
-#ifdef CONFIG_MAX30102_TRIGGER
-        k_sem_take(&sem, K_FOREVER);
-#else
-        if (sensor_sample_fetch(dev) < 0) {
-            LOG_ERR("Sample fetch failed\n");
-            return;
-        }
-        k_msleep(SLEEP_TIME_MS);
-#endif
-        struct sensor_value red;
-        struct sensor_value ir;
-        sensor_channel_get(max30102_dev, SENSOR_CHAN_RED, &red);
-        sensor_channel_get(max30102_dev, SENSOR_CHAN_IR, &ir);
+#ifdef CONFIG_MPU6050
+    while (!IS_ENABLED(CONFIG_MPU6050_TRIGGER)) {
+        int rc = process_mpu6050(mpu6050);
 
-        LOG_INF("RED=%x IR=%x", red.val1, ir.val1);
+        if (rc != 0) {
+            break;
+        }
+        k_sleep(K_SECONDS(2));
     }
+#endif
+
+    k_sem_take(&sem, K_FOREVER);
 }
